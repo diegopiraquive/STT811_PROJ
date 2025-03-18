@@ -1,0 +1,127 @@
+---
+title: "STT Project"
+author: "Almalki, Haifa & Piraquive Gomez, Diego "
+date: "2025-03-18"
+output:
+word_document: default
+---
+
+This is draft file for the STT811 semester project.
+
+Let’s start by reading the three source files, which are in txt format. Since the immunization and conditions files contain commas within some fields, this affects their readability. To address this issue, we will apply a custom function to parse each line of these files correctly.
+
+Reading the 'immunizations.txt' file:
+```{r}
+library(data.table)
+
+# Read all lines from the file
+lines_immunization <- readLines("Immunizations.txt")
+
+# Function to parse each line in Immunizations
+parse_immunization <- function(line) {
+  parts <- strsplit(line, ",", fixed = TRUE)[[1]]
+  
+  date <- parts[1]
+  patient <- parts[2]
+  encounter <- parts[3]
+  code <- parts[4]
+  
+  description <- paste(parts[-c(1:4)], collapse = ",")
+  
+  # Return a data frame
+  data.frame(
+    DATE = date,
+    PATIENT = patient,
+    ENCOUNTER = encounter,
+    CODE = code,
+    DESCRIPTION = description,
+    stringsAsFactors = FALSE
+  )
+}
+
+# Apply function
+immunizations <- do.call(rbind, lapply(lines_immunization, parse_immunization))
+
+# Convert to data.table
+setDT(immunizations)
+```
+
+Reading the 'conditions.txt' file:
+```{r}
+# Read all lines from the file
+lines_conditions <- readLines("conditions.txt")
+
+# Function to parse each line in conditions
+parse_conditions <- function(line) {
+
+  parts <- strsplit(line, ",", fixed = TRUE)[[1]]
+  
+  start <- parts[1]
+  stop <- parts[2]
+  patient <- parts[3]
+  encounter <- parts[4]
+  code <- parts[5]
+  
+  description <- paste(parts[-c(1:5)], collapse = ",")
+  
+  data.frame(
+    START = start,
+    STOP = stop,
+    PATIENT = patient,
+    ENCOUNTER = encounter,
+    CODE = code,
+    DESCRIPTION = description,
+    stringsAsFactors = FALSE
+  )
+}
+
+# Apply the function
+conditions <- do.call(rbind, lapply(lines_conditions, parse_conditions))
+
+# Convert to data.table
+setDT(conditions)
+```
+
+Reading the 'patients.txt' file:
+```{r}
+column_names_patients <- c("Id", "BIRTHDATE", "DEATHDATE", "SSN", "DRIVERS", "PASSPORT", 
+                           "PREFIX", "FIRST", "LAST", "SUFFIX", "MAIDEN", "MARITAL", "RACE", 
+                           "ETHNICITY", "GENDER", "BIRTHPLACE", "ADDRESS", "CITY", "STATE", 
+                           "COUNTY", "FIPS", "ZIP", "LAT", "LON", "HEALTHCARE_EXPENSES", 
+                           "HEALTHCARE_COVERAGE", "INCOME", "Mrn")
+
+patients <- fread("Patients.txt", header = FALSE, col.names = column_names_patients, fill = TRUE, na.strings = "\\N")
+```
+
+Let’s perform some feature engineering. First, let’s calculate the age of each patient, whether they are alive or not.
+```{r}
+patients[, BIRTHDATE := as.IDate(BIRTHDATE)]
+patients[, DEATHDATE := as.IDate(DEATHDATE)]
+
+patients[, Age := ifelse(is.na(DEATHDATE), 
+                         as.integer((as.Date(Sys.Date()) - as.Date(BIRTHDATE)) / 365.25),
+                         as.integer((as.Date(DEATHDATE) - as.Date(BIRTHDATE)) / 365.25))]
+```
+
+Creating a binary variable for deceased (1 = deceased, 0 = alive) to enable potential mortality risk analysis.
+```{r}
+patients[, deceased := ifelse(is.na(DEATHDATE), 0, 1)]
+```
+
+
+
+```{r}
+
+
+```
+
+```{r}
+
+```
+
+
+
+
+
+
+
