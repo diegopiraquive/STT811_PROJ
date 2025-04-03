@@ -2,13 +2,12 @@
 title: "STT Project"
 author: "Almalki, Haifa & Piraquive Gomez, Diego "
 date: "2025-03-18"
-output:
-word_document: default
+output: word_document
 ---
 
 This is draft file for the STT811 semester project.
 
-Let’s start by reading the three source files, which are in txt format. Since the immunization and conditions files contain commas within some fields, this affects their readability. To address this issue, we will apply a custom function to parse each line of these files correctly.
+Let’s start by reading the source files, which are in txt format. Since the immunization, conditions, and encounter files contain commas within some fields, this affects their readability. To address this issue, we will apply a custom function to parse each line of these files correctly.
 
 Reading the 'immunizations.txt' file:
 ```{r}
@@ -46,40 +45,41 @@ immunizations <- do.call(rbind, lapply(lines_immunization, parse_immunization))
 setDT(immunizations)
 ```
 
-Reading the 'conditions.txt' file:
+Reading the 'encounters.txt' file:
 ```{r}
+# Load required library
+library(data.table)
+
 # Read all lines from the file
-lines_conditions <- readLines("conditions.txt")
+lines_encounters <- readLines("encounters.txt")
 
-# Function to parse each line in conditions
-parse_conditions <- function(line) {
-
+# Define a function to parse each line
+parse_encounter <- function(line) {
   parts <- strsplit(line, ",", fixed = TRUE)[[1]]
   
-  start <- parts[1]
-  stop <- parts[2]
-  patient <- parts[3]
-  encounter <- parts[4]
-  code <- parts[5]
-  
-  description <- paste(parts[-c(1:5)], collapse = ",")
+  # First 10 fields are fixed; DESCRIPTION may contain commas, so we capture the rest as one field
+  if (length(parts) < 10) return(NULL)  # Skip malformed lines
   
   data.frame(
-    START = start,
-    STOP = stop,
-    PATIENT = patient,
-    ENCOUNTER = encounter,
-    CODE = code,
-    DESCRIPTION = description,
+    Id = parts[1],
+    START = parts[2],
+    STOP = parts[3],
+    PATIENT = parts[4],
+    ORGANIZATION = parts[5],
+    PROVIDER = parts[6],
+    PAYER = parts[7],
+    ENCOUNTERCLASS = parts[8],
+    CODE = parts[9],
+    DESCRIPTION = paste(parts[-(1:9)], collapse = ","),  # Remainder as DESCRIPTION
     stringsAsFactors = FALSE
   )
 }
 
-# Apply the function
-conditions <- do.call(rbind, lapply(lines_conditions, parse_conditions))
+# Apply the function to all lines
+encounters <- do.call(rbind, lapply(lines_encounters, parse_encounter))
 
 # Convert to data.table
-setDT(conditions)
+setDT(encounters)
 ```
 
 Reading the 'patients.txt' file:
@@ -93,7 +93,46 @@ column_names_patients <- c("Id", "BIRTHDATE", "DEATHDATE", "SSN", "DRIVERS", "PA
 patients <- fread("Patients.txt", header = FALSE, col.names = column_names_patients, fill = TRUE, na.strings = "\\N")
 ```
 
-Let’s perform some feature engineering. First, let’s calculate the age of each patient, whether they are alive or not.
+Now, let's perform some initial data analysis to check number of rows/columns of our datasets, missing values, data types, duplicates, etc.
+```{r}
+tables <- list(
+  patients = patients,
+  encounters = encounters,
+  immunizations = immunizations
+)
+
+for (name in names(tables)) {
+  cat("----", name, "----\n")
+  df <- tables[[name]]
+  
+  # Dimensions
+  cat("Rows:", nrow(df), " | Columns:", ncol(df), "\n\n")
+  
+  # Column types
+  cat("Structure:\n")
+  print(str(df))
+  
+  # Summary
+  cat("\nSummary:\n")
+  print(summary(df))
+  
+  # Missing values
+  cat("\nMissing values per column:\n")
+  print(colSums(is.na(df)))
+  
+  # Duplicates
+  cat("\nNumber of duplicate rows:\n")
+  print(sum(duplicated(df)))
+  
+  cat("\n\n")
+}
+
+```
+Brief summary: We do have some missing values but not in potential predictive features.
+
+Before to continue to an exploratory data analysis, let's perform some feature engineering to get more insights from our data.
+
+Calculating the age of each patient:
 ```{r}
 patients[, BIRTHDATE := as.IDate(BIRTHDATE)]
 patients[, DEATHDATE := as.IDate(DEATHDATE)]
@@ -103,21 +142,229 @@ patients[, Age := ifelse(is.na(DEATHDATE),
                          as.integer((as.Date(DEATHDATE) - as.Date(BIRTHDATE)) / 365.25))]
 ```
 
-Creating a binary variable for deceased (1 = deceased, 0 = alive) to enable potential mortality risk analysis.
+Calculating the number of encounters of each patient and adding it to the patients table. Preliminary we will work with the total number of encounters no matter the type. Further analysis might analyze by type.
 ```{r}
-patients[, deceased := ifelse(is.na(DEATHDATE), 0, 1)]
+library(sqldf)
+encounter_count <- sqldf("
+  SELECT PATIENT, COUNT(*) AS num_encounters
+  FROM encounters
+  GROUP BY PATIENT
+")
+
+# Merge to patients table
+patients <- merge(patients, encounter_count, by.x = "Id", by.y = "PATIENT", all.x = TRUE)
+
+# Replace NA with 0
+patients$num_encounters[is.na(patients$num_encounters)] <- 0
+```
+
+Creating a binary variable identify patients with insurance
+```{r}
+patients[, Has_Insurance := ifelse(HEALTHCARE_COVERAGE > 0, 1, 0)]
 ```
 
 
-
+Exploratory Data Analysis
+Let's get some insights from the data, starting with looking the most common vaccines.
 ```{r}
 
+sqldf("SELECT DESCRIPTION, COUNT(*) as Frequency 
+              FROM immunizations 
+              GROUP BY DESCRIPTION 
+              ORDER BY Frequency DESC
+              LIMIT 10")
+```
 
+We are planning to work with the tetanus vaccine. However, future work might include other vaccines. Let's create a function to easily add an specific vaccine count from the immunizations table to the patients table.
+
+Function to add more vaccines from the immunizations table to the patients table
+```{r}
+add_vaccine <- function(patients_dt, vaccine_name, new_col_prefix) {
+  vaccine_count <- sqldf(paste0("
+    SELECT PATIENT, COUNT(*) AS ", new_col_prefix, "_count
+    FROM immunizations
+    WHERE DESCRIPTION = '", vaccine_name, "'
+    GROUP BY PATIENT
+  "))
+
+  # Merge step
+  patients_dt <- merge(patients_dt, vaccine_count, by.x = "Id", by.y = "PATIENT", all.x = TRUE)
+
+  # Replace NAs with 0
+  patients_dt[is.na(get(paste0(new_col_prefix, "_count"))), 
+              (paste0(new_col_prefix, "_count")) := 0]
+
+  # Binary indicator
+  patients_dt[, (new_col_prefix) := as.integer(get(paste0(new_col_prefix, "_count")) > 0)]
+
+  return(patients_dt)
+}
+```
+
+Applying the function add_vaccine to add the tetanus count by patient to the patients table.
+```{r}
+patients <- add_vaccine(patients, 
+              "Five doses of tetanus toxoid\\, preservative-free and adsorbed\\, for adults.", 
+              "tetanus")
+```
+
+
+Looking at the distribution of the tetatuns vaccine among our patients dataset:
+```{r}
+sqldf("SELECT tetanus, COUNT(*) AS count
+       FROM patients
+       GROUP BY tetanus")
+```
+Seems that our target variable is unbalanced. We will need to handle this imbalance to avoid bias in our predictive model.
+
+
+
+Let's get some insights from the features that we might use as a predictors in our classification project.
+```{r}
+library(ggplot2)
+
+ggplot(patients, aes(x = Age)) +
+  geom_histogram(binwidth = 5, fill = "skyblue", color = "black") +
+  labs(title = "Distribution of Age", x = "Age", y = "Count") +
+  theme_minimal()
 ```
 
 ```{r}
-
+ggplot(patients, aes(x = INCOME)) +
+  geom_histogram(binwidth = 10000, fill = "skyblue", color = "black") +
+  labs(title = "Distribution of Income", x = "Income", y = "Count") +
+  theme_minimal()
 ```
+
+```{r}
+ggplot(patients, aes(x = RACE)) +
+  geom_bar(fill = "steelblue") +
+  labs(title = "Distribution of Race", x = "Race", y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+Since most of the patients are white, race does not seems to be a potential predictor.
+
+
+
+```{r}
+ggplot(patients[HEALTHCARE_COVERAGE < quantile(HEALTHCARE_COVERAGE, 0.95)], 
+       aes(x = HEALTHCARE_COVERAGE)) +
+  geom_histogram(binwidth = 10000, fill = "skyblue", color = "black") +
+  labs(title = "Distribution of Healthcare Coverage (Under 95th Percentile)", 
+       x = "Healthcare Coverage", y = "Count") +
+  theme_minimal()
+```
+Some patients shows $0 in insurance coverage, which suggest that they do not have an insurance. That's the reason why we created the binary variable Has_Insurance, to explore to potential predictive power of this variable.
+
+Looking at the insurance coverage distribution:
+```{r}
+sqldf("
+  SELECT 
+    Has_Insurance,
+    COUNT(*) AS Patient_Count
+  FROM patients
+  GROUP BY Has_Insurance
+")
+```
+
+Looking at the gender.
+```{r}
+ggplot(patients, aes(x = GENDER)) +
+  geom_bar(fill = "steelblue") +
+  labs(title = "Distribution of Gender", x = "Gender", y = "Count") +
+  theme_minimal()
+```
+Since we only have one gender, this variable can not be part of our predictors. 
+
+Let's see the linear correlation of some possible predictive features with our target variable tetanus.
+```{r, fig.width=8, fig.height=6}
+library(ggcorrplot)
+corr_vars <- patients[, .(Age, INCOME, Has_Insurance, num_encounters, tetanus)]
+corr_vars <- na.omit(corr_vars)
+
+cor_matrix <- cor(corr_vars)
+
+ggcorrplot(cor_matrix, 
+           method = "square", 
+           lab = TRUE, 
+           title = "Correlation Matrix: Vaccination vs Demographics",
+           colors = c("red", "white", "blue"))
+```
+
+
+Let's explore further the correlation of age with tetatus:
+```{r}
+ggplot(patients, aes(x = Age, fill = as.factor(tetanus))) +
+  geom_histogram(position = "identity", alpha = 0.6, bins = 30) +
+  scale_fill_manual(values = c("skyblue", "tomato"), name = "Tetanus") +
+  labs(title = "Age Distribution by Tetanus Status", x = "Age", y = "Count") +
+  theme_minimal()
+```
+
+Pre-processing for Modeling
+
+Let's create a copy of the patients table and re-check for missing values in our interested variables.
+```{r}
+patients_copy <- patients[, .(Age, Has_Insurance, num_encounters, INCOME, tetanus)]
+sapply(patients_copy, function(x) sum(is.na(x)))
+patients_copy$tetanus <- as.factor(patients_copy$tetanus)
+```
+No missing values.
+
+Since the ‘tetanus’ target variable is unbalanced, we are applying SMOTE to balance the dataset by oversampling the minority class. 
+```{r}
+library(ROSE)
+
+set.seed(123) 
+tetanus_model <- ovun.sample(tetanus ~ ., data = patients_copy, method = "over", p = 0.5)$data
+
+# Check target balance
+table(tetanus_model$tetanus)
+```
+Now our target variable tetanus looks balanced.
+
+Scaling continuous variables to standardize the data range, improving model training efficiency.
+```{r}
+tetanus_model$Age <- scale(tetanus_model$Age)
+tetanus_model$num_encounters <- scale(tetanus_model$num_encounters)
+tetanus_model$INCOME <- scale(tetanus_model$INCOME)
+```
+Now our data is pre-processed for our models. Let's start with a baseline model: Naive Bayes
+
+Splitting the data:
+```{r}
+split_pct <- 0.7
+n <- nrow(tetanus_model) * split_pct
+row_samp <- sample(1:nrow(tetanus_model), n, replace = FALSE)
+train_tetanus <- tetanus_model[row_samp, ]
+test_tetanus <- tetanus_model[-row_samp, ]
+```
+
+Applying Naive Bayes and getting metrics
+```{r}
+library(e1071)
+library(caret)
+
+tetanus_nb <- naiveBayes(tetanus ~ ., data = train_tetanus)
+predictions_tetanus_nb <- predict(tetanus_nb, test_tetanus)
+
+# Confusion matrix and accuracy
+cm_tetanus_nb <- confusionMatrix(predictions_tetanus_nb, test_tetanus$tetanus)
+print("Confusion Matrix:")
+print(cm_tetanus_nb$table)
+
+print("Naïve Bayes Accuracy:")
+print(cm_tetanus_nb$overall['Accuracy'])
+```
+We got promising results with our baseline Naive Bayes model. Next, we’ll perform cross-validation to validate these results before exploring more advanced machine learning models.
+
+
+
+
+
+
+
 
 
 
