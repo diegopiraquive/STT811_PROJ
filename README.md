@@ -7,6 +7,7 @@ This R-based project for the STT 811 course utilizes predictive modeling to asse
 ## Data
 
 The dataset includes the following text files hosted in the source_files directory:
+
 	•	Immunizations.txt: Vaccination records.
 	•	Encounters.txt: Healthcare visit records.
 	•	Patients.txt: Demographic and insurance data.
