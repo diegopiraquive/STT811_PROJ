@@ -23,3 +23,7 @@ Ensure all necessary R packages are installed as specified in the STT_Project.Rm
 ## Usage
 
 Open STT_Project.Rmd in RStudio and run the cells to execute the analysis.
+
+## Authors
+	•	Almalki, Haifa
+	•	Piraquive Gomez, Diego
