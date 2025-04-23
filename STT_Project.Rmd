@@ -5,8 +5,14 @@ date: "2025-03-18"
 output: word_document
 ---
 
-This is draft file for the STT811 semester project.
+This is the complementary notebook code for the STT811 semester project "Predictive Model for Tetanus Vaccination Adherence in the USA" by Almalki, Haifa and Piraquive Gomez, Diego.
 
+All the source txt files can be found in the GitHub Repository: https://github.com/diegopiraquive/STT811_PROJ
+
+All necessary packages to run this notebook are imported in the first cell where they are used.
+
+
+# Reading the source files
 Let’s start by reading the source files, which are in txt format. Since the immunization, conditions, and encounter files contain commas within some fields, this affects their readability. To address this issue, we will apply a custom function to parse each line of these files correctly.
 
 Reading the 'immunizations.txt' file:
@@ -93,6 +99,7 @@ column_names_patients <- c("Id", "BIRTHDATE", "DEATHDATE", "SSN", "DRIVERS", "PA
 patients <- fread("Patients.txt", header = FALSE, col.names = column_names_patients, fill = TRUE, na.strings = "\\N")
 ```
 
+# Initial Data Analysis
 Now, let's perform some initial data analysis to check number of rows/columns of our datasets, missing values, data types, duplicates, etc.
 ```{r}
 tables <- list(
@@ -164,7 +171,7 @@ patients[, Has_Insurance := ifelse(HEALTHCARE_COVERAGE > 0, 1, 0)]
 ```
 
 
-Exploratory Data Analysis
+# Exploratory Data Analysis
 Let's get some insights from the data, starting with looking the most common vaccines.
 ```{r}
 
@@ -302,7 +309,7 @@ ggplot(patients, aes(x = Age, fill = as.factor(tetanus))) +
   theme_minimal()
 ```
 
-Pre-processing for Modeling
+# Pre-processing for Modeling
 
 Let's create a copy of the patients table and re-check for missing values in our interested variables.
 ```{r}
@@ -312,7 +319,7 @@ patients_copy$tetanus <- as.factor(patients_copy$tetanus)
 ```
 No missing values.
 
-Since the ‘tetanus’ target variable is unbalanced, we are applying SMOTE to balance the dataset by oversampling the minority class. 
+Since the ‘tetanus’ target variable is unbalanced, we are applying SMOTE to balance the dataset by oversampling the minority class.
 ```{r}
 library(ROSE)
 
@@ -332,6 +339,8 @@ tetanus_model$INCOME <- scale(tetanus_model$INCOME)
 ```
 Now our data is pre-processed for our models. Let's start with a baseline model: Naive Bayes
 
+
+# Modeling: Baseline 
 Splitting the data:
 ```{r}
 split_pct <- 0.7
@@ -345,24 +354,217 @@ Applying Naive Bayes and getting metrics
 ```{r}
 library(e1071)
 library(caret)
+library(pROC)
 
 tetanus_nb <- naiveBayes(tetanus ~ ., data = train_tetanus)
-predictions_tetanus_nb <- predict(tetanus_nb, test_tetanus)
+test_predictions_tetanus_nb <- predict(tetanus_nb, test_tetanus)
+train_predictions_tetanus_nb <- predict(tetanus_nb, train_tetanus)
+
+nb_probs_test <- predict(tetanus_nb, test_tetanus, type = "raw")[,"1"]
+nb_roc_test <- roc(test_tetanus$tetanus, nb_probs_test)
+nb_probs_train <- predict(tetanus_nb, train_tetanus, type = "raw")[,"1"]
+nb_roc_train <- roc(train_tetanus$tetanus, nb_probs_train)
 
 # Confusion matrix and accuracy
-cm_tetanus_nb <- confusionMatrix(predictions_tetanus_nb, test_tetanus$tetanus)
-print("Confusion Matrix:")
-print(cm_tetanus_nb$table)
+test_cm_tetanus_nb <- confusionMatrix(test_predictions_tetanus_nb, test_tetanus$tetanus)
+train_cm_tetanus_nb <- confusionMatrix(train_predictions_tetanus_nb, train_tetanus$tetanus)
+print("Testing Confusion Matrix:")
+print(test_cm_tetanus_nb$table)
 
-print("Naïve Bayes Accuracy:")
-print(cm_tetanus_nb$overall['Accuracy'])
+print("Naïve Bayes Testing Accuracy:")
+print(test_cm_tetanus_nb$overall['Accuracy'])
+
+print("Naive Bayes Training Accuracy:")
+print(train_cm_tetanus_nb$overall['Accuracy'])
 ```
-We got promising results with our baseline Naive Bayes model. Next, we’ll perform cross-validation to validate these results before exploring more advanced machine learning models.
+We got promising results with our baseline Naive Bayes model, and there are no signs of overfitting, as both the training and testing accuracies are consistent. Now, we’ll explore more advanced machine learning models.
 
+# Modeling
+```{r}
+library(randomForest)
+library(xgboost)
 
+#------------------------------
+# XGBoost
+#------------------------------
 
+# Preparing data by creating a predictor matrix, converting target to numeric, and building DMatrix objects:
+train_x <- model.matrix(tetanus ~ . - 1, data = train_tetanus)
+test_x  <- model.matrix(tetanus ~ . - 1, data = test_tetanus)
 
+train_y <- as.numeric(as.character(train_tetanus$tetanus))
+test_y  <- as.numeric(as.character(test_tetanus$tetanus))
 
+dtrain <- xgb.DMatrix(data = train_x, label = train_y)
+dtest  <- xgb.DMatrix(data = test_x, label = test_y)
+
+# XGBoost parameters
+params <- list(
+  objective = "binary:logistic",
+  eval_metric = "error",
+  eta = 0.1,
+  max_depth = 6
+)
+
+# XGBoost model for 100 rounds
+xgb_model <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = 100,
+  verbose = 0
+)
+
+# Probabilities
+xgb_pred_train_prob <- predict(xgb_model, dtrain)
+xgb_pred_test_prob  <- predict(xgb_model, dtest)
+
+# Convert probabilities to factor predictions
+xgb_pred_train <- factor(ifelse(xgb_pred_train_prob > 0.5, "1", "0"), levels = c("0", "1"))
+xgb_pred_test  <- factor(ifelse(xgb_pred_test_prob > 0.5, "1", "0"), levels = c("0", "1"))
+
+# Compute matrix
+xgb_cm_train <- confusionMatrix(xgb_pred_train, train_tetanus$tetanus)
+xgb_cm_test  <- confusionMatrix(xgb_pred_test, test_tetanus$tetanus)
+
+xgb_roc_test <- roc(as.numeric(test_tetanus$tetanus) - 1, xgb_pred_test_prob)
+xgb_roc_train <- roc(as.numeric(train_tetanus$tetanus) - 1, xgb_pred_train_prob)
+
+#------------------------------
+# SVM Model
+#------------------------------
+svm_model <- svm(tetanus ~ ., data = train_tetanus, kernel = "radial", probability = TRUE)
+svm_pred_train <- predict(svm_model, train_tetanus)
+svm_pred_test  <- predict(svm_model, test_tetanus)
+
+svm_cm_train <- confusionMatrix(svm_pred_train, train_tetanus$tetanus)
+svm_cm_test  <- confusionMatrix(svm_pred_test, test_tetanus$tetanus)
+
+svm_probs_test <- attr(predict(svm_model, test_tetanus, probability = TRUE), "probabilities")[,"1"]
+svm_roc_test <- roc(test_tetanus$tetanus, svm_probs_test)
+svm_probs_train <- attr(predict(svm_model, train_tetanus, probability = TRUE), "probabilities")[,"1"]
+svm_roc_train <- roc(train_tetanus$tetanus, svm_probs_train)
+
+#------------------------------
+# Random Forest Model
+#------------------------------
+rf_model <- randomForest(tetanus ~ ., data = train_tetanus, ntree = 100)
+rf_pred_train <- predict(rf_model, train_tetanus)
+rf_pred_test  <- predict(rf_model, test_tetanus)
+
+rf_cm_train <- confusionMatrix(rf_pred_train, train_tetanus$tetanus)
+rf_cm_test  <- confusionMatrix(rf_pred_test, test_tetanus$tetanus)
+
+rf_probs_test <- predict(rf_model, test_tetanus, type = "prob")[,"1"]
+rf_roc_test <- roc(test_tetanus$tetanus, rf_probs_test)
+rf_probs_train <- predict(rf_model, train_tetanus, type = "prob")[,"1"]
+rf_roc_train <- roc(train_tetanus$tetanus, rf_probs_train)
+
+#------------------------------
+# Model Comparison
+#------------------------------
+
+# Testing Accuracies:
+cat("\nTesting Accuracy Comparison:\n")
+cat("Naive Bayes:", round(test_cm_tetanus_nb$overall['Accuracy'] * 100, 2), "%\n")
+cat("XGBoost:", round(xgb_cm_test$overall['Accuracy'] * 100, 2), "%\n")
+cat("SVM:", round(svm_cm_test$overall['Accuracy'] * 100, 2), "%\n")
+cat("Random Forest:", round(rf_cm_test$overall['Accuracy'] * 100, 2), "%\n")
+
+# Training Accuracies:
+cat("\nTraining Accuracy Comparison:\n")
+cat("Naive Bayes:", round(train_cm_tetanus_nb$overall['Accuracy'] * 100, 2), "%\n")
+cat("XGBoost:", round(xgb_cm_train$overall['Accuracy'] * 100, 2), "%\n")
+cat("SVM:", round(svm_cm_train$overall['Accuracy'] * 100, 2), "%\n")
+cat("Random Forest:", round(rf_cm_train$overall['Accuracy'] * 100, 2), "%\n")
+```
+Based on this preliminary results, all models demonstrated strong performance, with testing accuracies ranging from 89.69% for Naive Bayes to 97.03% for Random Forest. 
+
+We set standard parameters for our baseline XGBoost model. The ‘binary:logistic’ objective directly matches our goal of categorizing binary outcomes. We used the ‘error’ evaluation metric for a clear measure of performance. A conservative learning rate (Eta) of 0.1 and a maximum depth of 6 were chosen to balance complexity and control overfitting risk. Also, 100 rounds were considered enough for initial learning without excessive computation. 
+
+Training accuracies were similarly high, indicating good model fit. However, to ensure robustness and assess potential overfitting, we will examine additional metrics.
+
+```{r}
+library(dplyr)
+library(tidyr)
+models <- c("Naive Bayes", "XGBoost", "SVM", "Random Forest")
+
+cm_list_test <- list(test_cm_tetanus_nb, xgb_cm_test, svm_cm_test, rf_cm_test)
+cm_list_train <- list(train_cm_tetanus_nb, xgb_cm_train, svm_cm_train, rf_cm_train)
+roc_list_test <- list(nb_roc_test, xgb_roc_test, svm_roc_test, rf_roc_test)
+roc_list_train <- list(nb_roc_train, xgb_roc_train, svm_roc_train, rf_roc_train)
+
+metrics_df_test <- data.frame(
+  Model = models,
+  Accuracy = sapply(cm_list_test, function(cm) cm$overall['Accuracy']),
+  Precision = sapply(cm_list_test, function(cm) cm$byClass["Pos Pred Value"]),
+  ROC_AUC = sapply(roc_list_test, function(r) auc(r)),
+  F1_Score = sapply(cm_list_test, function(cm) cm$byClass['F1']))
+
+metrics_df_train <- data.frame(
+  Model = models,
+  Accuracy = sapply(cm_list_train, function(cm) cm$overall['Accuracy']),
+  Precision = sapply(cm_list_train, function(cm) cm$byClass["Pos Pred Value"]),
+  ROC_AUC = sapply(roc_list_train, function(r) auc(r)),
+  F1_Score = sapply(cm_list_train, function(cm) cm$byClass['F1']))
+
+metrics_df_test$Set <- "Test"
+metrics_df_train$Set <- "Train"
+combined_metrics_df <- bind_rows(metrics_df_test, metrics_df_train)
+
+# Plotting metrics
+long_metrics_df <- pivot_longer(combined_metrics_df, cols = c(Accuracy, Precision, ROC_AUC, F1_Score), names_to = "Metric", values_to = "Value")
+
+ggplot(long_metrics_df, aes(x = Model, y = Value, fill = Set)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  geom_text(aes(label = sprintf("%.0f%%", Value)), position = position_dodge(width = 0.9), vjust = -0.5, color = "black", size = 3.5) +
+  facet_wrap(~ Metric, scales = "free_y") +
+  theme_minimal(base_size = 16) + 
+  labs(title = "Model Performance Comparison", x = "Model", y = "Metric Value") +
+  scale_fill_brewer(palette = "Set1") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+```{r}
+print(combined_metrics_df)
+```
+
+Based on the previous results:
+- Random Forest and XGBoost showed superior precision, suggesting they are better at minimizing false positives.
+- XGBoost and Random Forest also exhibit good performance at ROC-AUC, which means they discriminate well between classes.
+- All models showed robust F1 scores, indicating a good balance between false positives and false negatives.
+
+The consistency of metrics between the training and testing sets for each model suggests minimal overfitting, indicating that the models are likely to perform well on unseen data, maintaining their predictive quality.
+
+Now extracting the feature importance from the random forest:
+```{r}
+importance_df <- as.data.frame(importance(rf_model))
+importance_df$Feature <- rownames(importance_df)
+
+total_importance <- sum(importance_df$MeanDecreaseGini)
+importance_df$Importance_Percent <- (importance_df$MeanDecreaseGini / total_importance) * 100
+
+importance_df <- importance_df[order(-importance_df$Importance_Percent), ]
+
+ggplot(importance_df, aes(x = reorder(Feature, Importance_Percent), y = Importance_Percent)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +  # Flip coordinates to make horizontal bars
+  theme_minimal() +
+  labs(
+    title = "Random Forest Feature Importance",
+    x = "Features",
+    y = "Relative Importance (%)"
+  ) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+  ) +
+  scale_y_continuous(labels = function(y) paste0(round(y, 1), "%")) +
+  geom_text(aes(label = paste0(round(Importance_Percent, 1), "%")), 
+            hjust = -0.2, size = 3.5)
+```
+
+The feature importance plot indicates that Age is the predominant predictor for the tetanus vaccine, contributing to 81% of the model’s decisions. Number of encounters and Income have lesser impacts at 12.2% and 4.5%, respectively, while Has Insurance has minimal influence at 2.2%. This suggests that for the tetanus vaccine, demographic factors like age are crucial, though this might vary with different vaccines.
+
+We can say that our model successfully predicted tetanus vaccination status, with Random Forest and XGBoost demonstrating high accuracy and minimal overfitting. These results can be important for health initiatives to identify unvaccinated individuals. Future steps can include extende analysis to other vaccines, further validation, and practical application within healthcare settings.
 
 
 
